@@ -10,11 +10,12 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
-import android.os.AsyncTask;
+import android.hardware.camera2.CaptureFailure;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.TotalCaptureResult;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.os.Looper;
 import android.support.annotation.NonNull;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
@@ -22,8 +23,6 @@ import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.Toolbar;
 import android.util.Log;
-import android.util.Size;
-import android.util.SparseIntArray;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -31,9 +30,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.Executor;
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = MainActivity.class.getName();
@@ -70,6 +67,9 @@ public class MainActivity extends AppCompatActivity {
     private CameraDevice camera;
     private String backFacingCamId;
     private CameraDevice.StateCallback camOpenCallback;
+    private CaptureRequest.Builder previewRequestBuilder;
+    private CameraCaptureSession previewSession;
+    private CameraCaptureSession.CaptureCallback previewCaptureCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -91,10 +91,18 @@ public class MainActivity extends AppCompatActivity {
         targetView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override
             public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
+                Log.i(TAG,"Target ready: "+width+"x"+height);
                 backFacingCamId = findBackFacingCamId(context);
                 CameraDevice backFacingCamera = tryGetCameraDevice(context, backFacingCamId, 20000);
                 camera=backFacingCamera;
-                tryStartCaptureSession(backFacingCamera,new Surface(surface),20000);
+                try {
+                    previewRequestBuilder=backFacingCamera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                } catch (CameraAccessException e) {
+                    Log.e(TAG,"Couldnt build builder",e);
+                }
+                previewRequestBuilder.addTarget(new Surface(surface));
+                tryConfigureCaptureSession(backFacingCamera,new Surface(surface),20000);
+                runCaptureSessions();
 
             }
 
@@ -125,17 +133,48 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void tryStartCaptureSession(CameraDevice camera, Surface target, int timeout){
+    private void runCaptureSessions(){
+        previewCaptureCallback=new CameraCaptureSession.CaptureCallback() {
+            @Override
+            public void onCaptureStarted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, long timestamp, long frameNumber) {
+                super.onCaptureStarted(session, request, timestamp, frameNumber);
+                Log.i(TAG,"Preview capture started");
+            }
+
+            @Override
+            public void onCaptureCompleted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull TotalCaptureResult result) {
+                super.onCaptureCompleted(session, request, result);
+                Log.i(TAG,"Preview capture completed");
+            }
+
+            @Override
+            public void onCaptureFailed(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull CaptureFailure failure) {
+                super.onCaptureFailed(session, request, failure);
+                Log.e(TAG,"Preview capture session failed: "+failure.getReason());
+            }
+        };
+        HandlerThread runCapSessionEventDispatcher=new HandlerThread(TAG+"_runcapturesession");
+        runCapSessionEventDispatcher.start();
+        try {
+            previewSession.setRepeatingRequest(previewRequestBuilder.build(),previewCaptureCallback,new Handler(runCapSessionEventDispatcher.getLooper()));
+        } catch (CameraAccessException e) {
+            Log.e(TAG,"Starting preview capture session failed",e);
+        }
+
+    }
+
+    private void tryConfigureCaptureSession(CameraDevice camera, Surface target, int timeout){
         List<Surface> targets=new ArrayList<>();
         targets.add(target);
-        tryStartCaptureSession(camera,targets,timeout);
+        tryConfigureCaptureSession(camera,targets,timeout);
     }
-    private void tryStartCaptureSession(CameraDevice camera,List<Surface> targets,int timeout){
+    private void tryConfigureCaptureSession(CameraDevice camera, List<Surface> targets, int timeout){
         final boolean[] configureSuccess = {false};
         CameraCaptureSession.StateCallback captureStateCallback=new CameraCaptureSession.StateCallback() {
             @Override
             public void onConfigured(@NonNull CameraCaptureSession session) {
                 Log.i(TAG,"CaptureSession configured");
+                previewSession=session;
                 configureSuccess[0] =true;
             }
 
@@ -145,7 +184,7 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         try {
-            HandlerThread capSessionEventDispatcher=new HandlerThread(TAG+"_capturesession");
+            HandlerThread capSessionEventDispatcher=new HandlerThread(TAG+"_confcapturesession");
             capSessionEventDispatcher.start();
             camera.createCaptureSession(targets,captureStateCallback,new Handler(capSessionEventDispatcher.getLooper()));
             for(int i=0;i<timeout;i++){
